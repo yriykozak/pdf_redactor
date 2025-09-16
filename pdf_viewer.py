@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QToolBar, QLineEdit, QComboBox, QScrollArea, QLabel,
     QStatusBar, QSplitter, QListWidget, QListWidgetItem,
-    QMessageBox, QFileDialog, QInputDialog
+    QMessageBox, QFileDialog, QInputDialog, QMenu
 )
 from PyQt6.QtGui import QAction, QPixmap, QIcon
 from PyQt6.QtCore import Qt, QTimer
@@ -64,6 +64,8 @@ class PDFViewer(QMainWindow):
         sidebar_layout.addWidget(QLabel("Bookmarks"))
         self.bookmarks_list = QListWidget()
         self.bookmarks_list.itemClicked.connect(self.bookmark_clicked)
+        self.bookmarks_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bookmarks_list.customContextMenuRequested.connect(self.show_bookmark_context_menu)
         sidebar_layout.addWidget(self.bookmarks_list)
 
         self.splitter.addWidget(self.sidebar)
@@ -321,6 +323,42 @@ class PDFViewer(QMainWindow):
         self.current_page = page_num
         self.display_page()
         self.update_ui()
+
+    def show_bookmark_context_menu(self, pos):
+        item = self.bookmarks_list.itemAt(pos)
+        if item:
+            menu = QMenu()
+            delete_action = menu.addAction("Delete Bookmark")
+            action = menu.exec(self.bookmarks_list.mapToGlobal(pos))
+            if action == delete_action:
+                self.delete_bookmark(item)
+
+    def delete_bookmark(self, item):
+        if not self.current_pdf:
+            return
+
+        try:
+            bookmark_to_delete_page = item.data(Qt.ItemDataRole.UserRole)
+            
+            # Find the bookmark to delete
+            bookmarks_for_pdf = self.bookmarks.get(self.current_pdf, [])
+            bookmark_to_delete = None
+            for bookmark in bookmarks_for_pdf:
+                if bookmark['page'] == bookmark_to_delete_page and f"{bookmark['name']} (Page {bookmark['page'] + 1})" == item.text():
+                    bookmark_to_delete = bookmark
+                    break
+            
+            if bookmark_to_delete:
+                reply = QMessageBox.question(self, 'Delete Bookmark',
+                                             f"Are you sure you want to delete the bookmark '{bookmark_to_delete['name']}'?",
+                                             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+
+                if reply == QMessageBox.StandardButton.Ok:
+                    bookmarks_for_pdf.remove(bookmark_to_delete)
+                    self.save_bookmarks()
+                    self.update_bookmarks()
+        except Exception as e:
+            print(f"Error deleting bookmark: {e}")
 
     def closeEvent(self, event):
         self.save_last_session()
