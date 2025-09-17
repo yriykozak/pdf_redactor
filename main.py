@@ -6,5 +6,5 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # Use Fusion style for better customization
     viewer = PDFViewer()
-    viewer.show()
+    viewer.showMaximized()
     sys.exit(app.exec())

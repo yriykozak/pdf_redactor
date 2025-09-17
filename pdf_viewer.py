@@ -36,6 +36,7 @@ class PDFViewer(QMainWindow):
         self.data_folder = "app_data"
         self.last_session_file = os.path.join(self.data_folder, "last_session.json")
         self.bookmarks_file = os.path.join(self.data_folder, "bookmarks.json")
+        self.first_load = True
 
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
@@ -44,7 +45,6 @@ class PDFViewer(QMainWindow):
 
         self.init_ui()
         self.apply_windows11_style()
-        self.load_last_session()
 
     def init_ui(self):
         self.setWindowTitle("PDF Reader")
@@ -106,7 +106,8 @@ class PDFViewer(QMainWindow):
         self.toolbar.addAction(self.zoom_out_action)
 
         self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["50%", "75%", "100%", "125%", "150%", "200%", "Fit Width", "Fit Page"])
+        self.zoom_combo.setEditable(True)
+        self.zoom_combo.addItems(["50%", "75%", "100%", "125%", "150%", "175%", "200%", "Fit Width", "Fit Page"])
         self.zoom_combo.setCurrentText("100%")
         self.zoom_combo.currentTextChanged.connect(self.zoom_changed)
         self.toolbar.addWidget(self.zoom_combo)
@@ -147,14 +148,15 @@ class PDFViewer(QMainWindow):
         main_layout_main.addWidget(self.toast_label)
 
     def apply_windows11_style(self):
-        self.setStyleSheet("""
+        self.setStyleSheet('''
             QMainWindow { background-color: #f3f3f3; border-radius: 8px; }
             QToolBar { background-color: #ffffff; border-bottom: 1px solid #e1e1e1; padding: 5px; }
             QPushButton, QComboBox, QLineEdit { border: 1px solid #cccccc; border-radius: 4px; padding: 5px; background-color: #ffffff; }
             QPushButton:hover { background-color: #e6e6e6; }
+            QComboBox::item:hover { background-color: #e6e6e6; color: black; }
             QListWidget { background-color: #ffffff; border: 1px solid #cccccc; border-radius: 4px; }
             QStatusBar { background-color: #ffffff; border-top: 1px solid #e1e1e1; }
-        """)
+        ''')
 
     def toggle_sidebar(self):
         self.sidebar.setVisible(not self.sidebar.isVisible())
@@ -164,7 +166,7 @@ class PDFViewer(QMainWindow):
         if file_path:
             self.load_pdf(file_path)
 
-    def load_pdf(self, file_path, page_number=0):
+    def load_pdf(self, file_path, page_number=0, show_page=True):
         try:
             self.doc = fitz.open(file_path)
             self.total_pages = len(self.doc)
@@ -173,7 +175,8 @@ class PDFViewer(QMainWindow):
             self.current_page = page_number
             
             self.update_bookmarks()
-            self.display_page()
+            if show_page:
+                self.display_page()
             self.update_ui()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open PDF: {str(e)}")
@@ -182,12 +185,15 @@ class PDFViewer(QMainWindow):
         if self.doc and 0 <= self.current_page < self.total_pages:
             page = self.doc[self.current_page]
             zoom_text = self.zoom_combo.currentText()
-            if zoom_text == "Fit Width":
-                zoom = self.scroll_area.width() / page.rect.width
-            elif zoom_text == "Fit Page":
-                zoom = min(self.scroll_area.width() / page.rect.width, self.scroll_area.height() / page.rect.height)
-            else:
-                zoom = float(zoom_text.strip('%')) / 100.0
+            try:
+                if zoom_text == "Fit Width":
+                    zoom = self.scroll_area.width() / page.rect.width
+                elif zoom_text == "Fit Page":
+                    zoom = min(self.scroll_area.width() / page.rect.width, self.scroll_area.height() / page.rect.height)
+                else:
+                    zoom = float(zoom_text.strip('%')) / 100.0
+            except ValueError:
+                return  # Ignore invalid zoom values during typing
 
             matrix = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=matrix)
@@ -233,7 +239,8 @@ class PDFViewer(QMainWindow):
             self.display_page()
 
     def zoom_changed(self):
-        self.display_page()
+        if self.doc:
+            self.display_page()
         self.update_zoom_label()
 
     def update_ui(self):
@@ -272,7 +279,8 @@ class PDFViewer(QMainWindow):
         if self.current_pdf:
             session_data = {
                 "last_opened_pdf": self.current_pdf,
-                "last_opened_page": self.current_page
+                "last_opened_page": self.current_page,
+                "zoom_setting": self.zoom_combo.currentText()
             }
             with open(self.last_session_file, "w") as f:
                 json.dump(session_data, f)
@@ -283,8 +291,10 @@ class PDFViewer(QMainWindow):
                 session_data = json.load(f)
                 pdf_path = session_data.get("last_opened_pdf")
                 page = session_data.get("last_opened_page", 0)
+                zoom_setting = session_data.get("zoom_setting", "100%")
                 if pdf_path and os.path.exists(pdf_path):
-                    self.load_pdf(pdf_path, page)
+                    self.load_pdf(pdf_path, page, show_page=False)
+                    self.zoom_combo.setCurrentText(zoom_setting)
                     self.show_toast(f"Resumed from last session: Page {page + 1}")
         except (FileNotFoundError, json.JSONDecodeError):
             pass
@@ -363,3 +373,11 @@ class PDFViewer(QMainWindow):
     def closeEvent(self, event):
         self.save_last_session()
         event.accept()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.first_load:
+            self.load_last_session()
+            self.first_load = False
+            if self.doc:
+                self.display_page()
