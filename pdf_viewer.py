@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QStatusBar, QSplitter, QListWidget, QListWidgetItem,
     QMessageBox, QFileDialog, QInputDialog, QMenu
 )
-from PyQt6.QtGui import QAction, QPixmap, QIcon
+from PyQt6.QtGui import QAction, QPixmap, QIcon, QCursor
 from PyQt6.QtCore import Qt, QTimer
 import fitz  # PyMuPDF
 
@@ -15,14 +15,46 @@ class PDFLabel(QLabel):
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
+        self.setMouseTracking(True)
 
     def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        if delta > 0:
-            self.viewer.prev_page()
-        elif delta < 0:
-            self.viewer.next_page()
-        event.accept()
+        if self.viewer.hand_tool_action.isChecked():
+            event.ignore()
+        else:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.viewer.prev_page()
+            elif delta < 0:
+                self.viewer.next_page()
+            event.accept()
+
+    def mousePressEvent(self, event):
+        if self.viewer.hand_tool_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
+            self.viewer.panning = True
+            self.viewer.pan_last_pos = event.globalPosition().toPoint()
+            self.viewer.pan_start_scroll_pos = (self.viewer.scroll_area.horizontalScrollBar().value(), self.viewer.scroll_area.verticalScrollBar().value())
+            self.setCursor(self.viewer.closed_hand_cursor)
+            event.accept()
+        else:
+            event.ignore()
+
+    def mouseMoveEvent(self, event):
+        if self.viewer.panning and event.buttons() == Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self.viewer.pan_last_pos
+            h_scroll, v_scroll = self.viewer.pan_start_scroll_pos
+            self.viewer.scroll_area.horizontalScrollBar().setValue(h_scroll - delta.x())
+            self.viewer.scroll_area.verticalScrollBar().setValue(v_scroll - delta.y())
+            event.accept()
+        else:
+            event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        if self.viewer.hand_tool_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
+            self.viewer.panning = False
+            self.setCursor(self.viewer.open_hand_cursor)
+            event.accept()
+        else:
+            event.ignore()
 
 
 class PDFViewer(QMainWindow):
@@ -37,11 +69,17 @@ class PDFViewer(QMainWindow):
         self.last_session_file = os.path.join(self.data_folder, "last_session.json")
         self.bookmarks_file = os.path.join(self.data_folder, "bookmarks.json")
         self.first_load = True
+        self.panning = False
+        self.pan_last_pos = None
+        self.pan_start_scroll_pos = None
 
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
 
         self.bookmarks = self.load_bookmarks()
+
+        self.open_hand_cursor = QCursor(QPixmap("app_data/open_hand.png"))
+        self.closed_hand_cursor = QCursor(QPixmap("app_data/closed_hand.png"))
 
         self.init_ui()
         self.apply_windows11_style()
@@ -119,6 +157,13 @@ class PDFViewer(QMainWindow):
         self.search_action = QAction("🔍", self)
         self.search_action.triggered.connect(self.show_search)
         self.toolbar.addAction(self.search_action)
+
+        self.hand_tool_action = QAction(QIcon("app_data/open_hand.png"), "Hand Tool", self)
+        self.hand_tool_action.setCheckable(True)
+        self.hand_tool_action.setShortcut("H")
+        self.hand_tool_action.setToolTip("Hand Tool (H)")
+        self.hand_tool_action.triggered.connect(self.toggle_hand_tool)
+        self.toolbar.addAction(self.hand_tool_action)
 
         self.scroll_area = QScrollArea()
         self.pdf_label = PDFLabel(self)
@@ -381,3 +426,13 @@ class PDFViewer(QMainWindow):
             self.first_load = False
             if self.doc:
                 self.display_page()
+
+    def toggle_hand_tool(self):
+        if self.hand_tool_action.isChecked():
+            self.pdf_label.setCursor(self.open_hand_cursor)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        else:
+            self.pdf_label.unsetCursor()
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
