@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QToolBar, QLineEdit, QComboBox, QScrollArea, QLabel,
     QStatusBar, QSplitter, QListWidget, QListWidgetItem,
-    QMessageBox, QFileDialog, QInputDialog, QMenu
+    QMessageBox, QFileDialog, QInputDialog, QMenu, QRubberBand
 )
 from PyQt6.QtGui import QAction, QPixmap, QIcon, QCursor
 from PyQt6.QtCore import Qt, QTimer
@@ -29,32 +29,61 @@ class PDFLabel(QLabel):
             event.accept()
 
     def mousePressEvent(self, event):
+        print("mousePressEvent")
         if self.viewer.hand_tool_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
             self.viewer.panning = True
             self.viewer.pan_last_pos = event.globalPosition().toPoint()
             self.viewer.pan_start_scroll_pos = (self.viewer.scroll_area.horizontalScrollBar().value(), self.viewer.scroll_area.verticalScrollBar().value())
             self.setCursor(self.viewer.closed_hand_cursor)
             event.accept()
+        elif self.viewer.text_selection_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
+            print("start selection")
+            self.viewer.selection_origin = event.pos()
+            if not self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), 0, 0)
+            self.viewer.selection_rubberband.show()
+            event.accept()
         else:
             event.ignore()
 
     def mouseMoveEvent(self, event):
+        print("mouseMoveEvent")
         if self.viewer.panning and event.buttons() == Qt.MouseButton.LeftButton:
             delta = event.globalPosition().toPoint() - self.viewer.pan_last_pos
             h_scroll, v_scroll = self.viewer.pan_start_scroll_pos
             self.viewer.scroll_area.horizontalScrollBar().setValue(h_scroll - delta.x())
             self.viewer.scroll_area.verticalScrollBar().setValue(v_scroll - delta.y())
             event.accept()
-        else:
-            event.ignore()
+        elif self.viewer.text_selection_action.isChecked() and event.buttons() == Qt.MouseButton.LeftButton:
+            print("selection in progress")
+            if self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), event.pos().x() - self.viewer.selection_origin.x(), event.pos().y() - self.viewer.selection_origin.y())
+            event.accept()
 
     def mouseReleaseEvent(self, event):
         if self.viewer.hand_tool_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
             self.viewer.panning = False
             self.setCursor(self.viewer.open_hand_cursor)
             event.accept()
+        elif self.viewer.text_selection_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
+            if self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband.hide()
+                selection_rect = self.viewer.selection_rubberband.geometry()
+                self.viewer.extract_text(selection_rect)
+            event.accept()
         else:
             event.ignore()
+
+    def contextMenuEvent(self, event):
+        if self.viewer.selected_text:
+            menu = QMenu(self)
+            copy_action = menu.addAction("Copy")
+            action = menu.exec(self.mapToGlobal(event.pos()))
+            if action == copy_action:
+                QApplication.clipboard().setText(self.viewer.selected_text)
+                self.viewer.show_toast("Text copied to clipboard")
+
 
 
 class PDFViewer(QMainWindow):
@@ -72,6 +101,10 @@ class PDFViewer(QMainWindow):
         self.panning = False
         self.pan_last_pos = None
         self.pan_start_scroll_pos = None
+        self.text_selection_cursor = QCursor(Qt.CursorShape.IBeamCursor)
+        self.selection_rubberband = None
+        self.selected_text = None
+        self.selection_origin = None
 
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
@@ -164,6 +197,13 @@ class PDFViewer(QMainWindow):
         self.hand_tool_action.setToolTip("Hand Tool (H)")
         self.hand_tool_action.triggered.connect(self.toggle_hand_tool)
         self.toolbar.addAction(self.hand_tool_action)
+
+        self.text_selection_action = QAction(QIcon("app_data/text_cursor.png"), "Highlight Text", self)
+        self.text_selection_action.setCheckable(True)
+        self.text_selection_action.setShortcut("V")
+        self.text_selection_action.setToolTip("Highlight Text (V)")
+        self.text_selection_action.triggered.connect(self.toggle_text_selection_tool)
+        self.toolbar.addAction(self.text_selection_action)
 
         self.scroll_area = QScrollArea()
         self.pdf_label = PDFLabel(self)
@@ -415,6 +455,34 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             print(f"Error deleting bookmark: {e}")
 
+    def extract_text(self, selection_rect):
+        if not self.doc or not self.pdf_label.pixmap():
+            return
+
+        page = self.doc[self.current_page]
+        zoom = self.pdf_label.pixmap().width() / page.rect.width
+
+        # Account for the pixmap alignment within the label
+        pixmap_x = (self.pdf_label.width() - self.pdf_label.pixmap().width()) / 2
+        pixmap_y = (self.pdf_label.height() - self.pdf_label.pixmap().height()) / 2
+
+        # Convert widget coordinates to pixmap coordinates
+        selection_x = selection_rect.x() - pixmap_x
+        selection_y = selection_rect.y() - pixmap_y
+
+        # Convert pixmap coordinates to PDF coordinates
+        pdf_x0 = selection_x / zoom
+        pdf_y0 = selection_y / zoom
+        pdf_x1 = (selection_x + selection_rect.width()) / zoom
+        pdf_y1 = (selection_y + selection_rect.height()) / zoom
+
+        pdf_rect = fitz.Rect(pdf_x0, pdf_y0, pdf_x1, pdf_y1)
+        
+        self.selected_text = page.get_text("text", clip=pdf_rect)
+        if self.selected_text:
+            QApplication.clipboard().setText(self.selected_text)
+            self.show_toast("Text copied to clipboard")
+
     def closeEvent(self, event):
         self.save_last_session()
         event.accept()
@@ -432,7 +500,26 @@ class PDFViewer(QMainWindow):
             self.pdf_label.setCursor(self.open_hand_cursor)
             self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            if self.text_selection_action.isChecked():
+                self.text_selection_action.setChecked(False)
         else:
             self.pdf_label.unsetCursor()
             self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def toggle_text_selection_tool(self):
+        if self.text_selection_action.isChecked():
+            self.pdf_label.setCursor(self.text_selection_cursor)
+            if self.hand_tool_action.isChecked():
+                self.hand_tool_action.setChecked(False)
+        else:
+            self.pdf_label.unsetCursor()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self.selected_text:
+                QApplication.clipboard().setText(self.selected_text)
+                self.show_toast("Text copied to clipboard")
+        else:
+            super().keyPressEvent(event)
+            self.pdf_label.unsetCursor()
