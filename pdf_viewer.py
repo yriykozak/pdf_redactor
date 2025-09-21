@@ -44,6 +44,13 @@ class PDFLabel(QLabel):
             self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), 0, 0)
             self.viewer.selection_rubberband.show()
             event.accept()
+        elif self.viewer.is_screenshot_mode and event.button() == Qt.MouseButton.LeftButton:
+            self.viewer.selection_origin = event.pos()
+            if not self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), 0, 0)
+            self.viewer.selection_rubberband.show()
+            event.accept()
         else:
             event.ignore()
 
@@ -60,6 +67,10 @@ class PDFLabel(QLabel):
             if self.viewer.selection_rubberband:
                 self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), event.pos().x() - self.viewer.selection_origin.x(), event.pos().y() - self.viewer.selection_origin.y())
             event.accept()
+        elif self.viewer.is_screenshot_mode and event.buttons() == Qt.MouseButton.LeftButton:
+            if self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband.setGeometry(self.viewer.selection_origin.x(), self.viewer.selection_origin.y(), event.pos().x() - self.viewer.selection_origin.x(), event.pos().y() - self.viewer.selection_origin.y())
+            event.accept()
 
     def mouseReleaseEvent(self, event):
         if self.viewer.hand_tool_action.isChecked() and event.button() == Qt.MouseButton.LeftButton:
@@ -71,6 +82,12 @@ class PDFLabel(QLabel):
                 self.viewer.selection_rubberband.hide()
                 selection_rect = self.viewer.selection_rubberband.geometry()
                 self.viewer.extract_text(selection_rect)
+            event.accept()
+        elif self.viewer.is_screenshot_mode and event.button() == Qt.MouseButton.LeftButton:
+            if self.viewer.selection_rubberband:
+                self.viewer.selection_rubberband.hide()
+                selection_rect = self.viewer.selection_rubberband.geometry()
+                self.viewer.capture_screenshot(selection_rect)
             event.accept()
         else:
             event.ignore()
@@ -105,6 +122,9 @@ class PDFViewer(QMainWindow):
         self.selection_rubberband = None
         self.selected_text = None
         self.selection_origin = None
+        self.screenshot_action = None
+        self.is_screenshot_mode = False
+        self.screenshot_cursor = QCursor(Qt.CursorShape.CrossCursor)
 
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
@@ -204,6 +224,13 @@ class PDFViewer(QMainWindow):
         self.text_selection_action.setToolTip("Highlight Text (V)")
         self.text_selection_action.triggered.connect(self.toggle_text_selection_tool)
         self.toolbar.addAction(self.text_selection_action)
+
+        self.screenshot_action = QAction(QIcon("app_data/screenshot.svg"), "Screenshot", self)
+        self.screenshot_action.setCheckable(True)
+        self.screenshot_action.setShortcut("S")
+        self.screenshot_action.setToolTip("Screenshot (S)")
+        self.screenshot_action.triggered.connect(self.toggle_screenshot_tool)
+        self.toolbar.addAction(self.screenshot_action)
 
         self.scroll_area = QScrollArea()
         self.pdf_label = PDFLabel(self)
@@ -483,6 +510,39 @@ class PDFViewer(QMainWindow):
             QApplication.clipboard().setText(self.selected_text)
             self.show_toast("Text copied to clipboard")
 
+    def capture_screenshot(self, selection_rect):
+        if not self.doc or not self.pdf_label.pixmap():
+            return
+
+        page = self.doc[self.current_page]
+        zoom = self.pdf_label.pixmap().width() / page.rect.width
+
+        # Account for the pixmap alignment within the label
+        pixmap_x = (self.pdf_label.width() - self.pdf_label.pixmap().width()) / 2
+        pixmap_y = (self.pdf_label.height() - self.pdf_label.pixmap().height()) / 2
+
+        # Convert widget coordinates to pixmap coordinates
+        selection_x = selection_rect.x() - pixmap_x
+        selection_y = selection_rect.y() - pixmap_y
+
+        # Convert pixmap coordinates to PDF coordinates
+        pdf_x0 = selection_x / zoom
+        pdf_y0 = selection_y / zoom
+        pdf_x1 = (selection_x + selection_rect.width()) / zoom
+        pdf_y1 = (selection_y + selection_rect.height()) / zoom
+
+        pdf_rect = fitz.Rect(pdf_x0, pdf_y0, pdf_x1, pdf_y1)
+
+        # Render the selected area as a pixmap
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix, clip=pdf_rect)
+
+        # Convert to QImage and copy to clipboard
+        image = QPixmap()
+        image.loadFromData(pix.tobytes("png"))
+        QApplication.clipboard().setPixmap(image)
+        self.show_toast("Screenshot copied to clipboard")
+
     def closeEvent(self, event):
         self.save_last_session()
         event.accept()
@@ -502,6 +562,8 @@ class PDFViewer(QMainWindow):
             self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             if self.text_selection_action.isChecked():
                 self.text_selection_action.setChecked(False)
+            if self.screenshot_action.isChecked():
+                self.screenshot_action.setChecked(False)
         else:
             self.pdf_label.unsetCursor()
             self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -512,7 +574,21 @@ class PDFViewer(QMainWindow):
             self.pdf_label.setCursor(self.text_selection_cursor)
             if self.hand_tool_action.isChecked():
                 self.hand_tool_action.setChecked(False)
+            if self.screenshot_action.isChecked():
+                self.screenshot_action.setChecked(False)
         else:
+            self.pdf_label.unsetCursor()
+
+    def toggle_screenshot_tool(self):
+        if self.screenshot_action.isChecked():
+            self.is_screenshot_mode = True
+            self.pdf_label.setCursor(self.screenshot_cursor)
+            if self.hand_tool_action.isChecked():
+                self.hand_tool_action.setChecked(False)
+            if self.text_selection_action.isChecked():
+                self.text_selection_action.setChecked(False)
+        else:
+            self.is_screenshot_mode = False
             self.pdf_label.unsetCursor()
 
     def keyPressEvent(self, event):
