@@ -2,7 +2,7 @@ import sys
 import fitz
 import json
 import os
-from PyQt6.QtWidgets import QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QInputDialog, QToolBar, QComboBox, QLabel
+from PyQt6.QtWidgets import QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QInputDialog, QToolBar, QComboBox, QLabel, QGraphicsLineItem, QGraphicsPixmapItem
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QResizeEvent
 from PyQt6.QtCore import Qt
 from logical_document import LogicalDocument
@@ -12,26 +12,87 @@ class PDFView(QGraphicsView):
         super().__init__(scene, parent)
         self.parent_viewer = parent
         self.selection_rect = None
+        self.selected_annot_rect = None
+        self.selected_annot_page = None
+        self.annot_highlight = None
+
+        # Alignment guides
+        guide_pen = QPen(QColor("green"), 1, Qt.PenStyle.SolidLine)
+        self.guide_top = QGraphicsLineItem()
+        self.guide_bottom = QGraphicsLineItem()
+        self.guide_left = QGraphicsLineItem()
+        self.guide_right = QGraphicsLineItem()
+        self.guides = [self.guide_top, self.guide_bottom, self.guide_left, self.guide_right]
+        for guide in self.guides:
+            guide.setPen(guide_pen)
+            guide.setZValue(100)
+            guide.hide()
+            self.scene().addItem(guide)
+
+    def update_and_show_guides(self, rect_on_scene, page_y_start):
+        offset = 2
+        bottom_offset = 4 # Increased offset for the bottom guide
+        scene_rect = self.scene().sceneRect()
+        self.guide_top.setLine(scene_rect.left(), rect_on_scene.y0 + page_y_start + offset, scene_rect.right(), rect_on_scene.y0 + page_y_start + offset)
+        self.guide_bottom.setLine(scene_rect.left(), rect_on_scene.y1 + page_y_start - bottom_offset, scene_rect.right(), rect_on_scene.y1 + page_y_start - bottom_offset)
+        self.guide_left.setLine(rect_on_scene.x0 + offset, scene_rect.top(), rect_on_scene.x0 + offset, scene_rect.bottom())
+        self.guide_right.setLine(rect_on_scene.x1 - offset, scene_rect.top(), rect_on_scene.x1 - offset, scene_rect.bottom())
+        for guide in self.guides:
+            guide.show()
+
+    def hide_guides(self):
+        for guide in self.guides:
+            guide.hide()
 
     def mousePressEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
+        zoom = self.parent_viewer.zoom_factor
 
-        if self.parent_viewer.logical_doc:
+        if self.parent_viewer.doc:
+            # Check for annotation selection first
+            page, page_y_start = self.parent_viewer.get_page_at(scene_pos.y())
+            if page:
+                page_x = scene_pos.x() / zoom
+                page_y = (scene_pos.y() - page_y_start) / zoom
+                page_point = fitz.Point(page_x, page_y)
+
+                for annot in page.annots():
+                    if page_point in annot.rect:
+                        self.selected_annot_rect = annot.rect
+                        self.selected_annot_page = page.number
+                        if self.annot_highlight:
+                            self.scene().removeItem(self.annot_highlight)
+                        
+                        rect_on_scene = annot.rect * zoom
+                        self.annot_highlight = QGraphicsRectItem(rect_on_scene.x0, rect_on_scene.y0 + page_y_start, rect_on_scene.width, rect_on_scene.height)
+                        self.annot_highlight.setPen(QPen(QColor("red")))
+                        self.scene().addItem(self.annot_highlight)
+                        
+                        self.update_and_show_guides(rect_on_scene, page_y_start)
+                        return
+
+            # If no annotation was selected, clear selection and proceed
+            if self.selected_annot_rect:
+                self.selected_annot_rect = None
+                self.selected_annot_page = None
+                self.scene().removeItem(self.annot_highlight)
+                self.annot_highlight = None
+                self.hide_guides()
+
+            # Word selection logic
             page_num = -1
-            page_y_start = 0
-            zoom = self.parent_viewer.zoom_factor
-
+            page_y_start_word = 0
             for i in range(len(self.parent_viewer.doc)):
                 page_height = self.parent_viewer.doc[i].rect.height * zoom
-                if page_y_start <= scene_pos.y() < page_y_start + page_height:
+                if page_y_start_word <= scene_pos.y() < page_y_start_word + page_height:
                     page_num = i
                     break
-                page_y_start += page_height + 10
+                page_y_start_word += page_height + 10
 
             if page_num == -1:
                 return
 
-            page_pos_y = (scene_pos.y() - page_y_start) / zoom
+            page_pos_y = (scene_pos.y() - page_y_start_word) / zoom
             page_pos_x = scene_pos.x() / zoom
 
             page_words = self.parent_viewer.logical_doc.get_page_words(page_num)
@@ -53,10 +114,67 @@ class PDFView(QGraphicsView):
 
                 x0, y0, x1, y1, _, _, _, _ = clicked_word
 
-                rect = QGraphicsRectItem(x0 * zoom, y0 * zoom + page_y_start, (x1 - x0) * zoom, (y1 - y0) * zoom)
+                rect = QGraphicsRectItem(x0 * zoom, y0 * zoom + page_y_start_word, (x1 - x0) * zoom, (y1 - y0) * zoom)
                 rect.setPen(QPen(QColor("yellow")))
                 rect.setBrush(QColor(255, 255, 0, 100))
                 self.selection_rect = self.scene().addRect(rect.rect(), rect.pen(), rect.brush())
+
+    def keyPressEvent(self, event):
+        if self.selected_annot_rect:
+            page = self.parent_viewer.doc.load_page(self.selected_annot_page)
+            found_annot = None
+            for annot in page.annots():
+                if abs(annot.rect.x0 - self.selected_annot_rect.x0) < 0.1 and \
+                   abs(annot.rect.y0 - self.selected_annot_rect.y0) < 0.1:
+                    found_annot = annot
+                    break
+            
+            if found_annot:
+                move_dist = 1
+                rect = found_annot.rect
+
+                if event.key() == Qt.Key.Key_Up:
+                    rect.y0 -= move_dist
+                    rect.y1 -= move_dist
+                elif event.key() == Qt.Key.Key_Down:
+                    rect.y0 += move_dist
+                    rect.y1 += move_dist
+                elif event.key() == Qt.Key.Key_Left:
+                    rect.x0 -= move_dist
+                    rect.x1 -= move_dist
+                elif event.key() == Qt.Key.Key_Right:
+                    rect.x0 += move_dist
+                    rect.x1 += move_dist
+                elif event.key() == Qt.Key.Key_Delete:
+                    page.delete_annot(found_annot)
+                    self.selected_annot_rect = None
+                    self.selected_annot_page = None
+                    if self.annot_highlight:
+                        self.scene().removeItem(self.annot_highlight)
+                        self.annot_highlight = None
+                    self.hide_guides()
+                    self.parent_viewer.refresh_view()
+                    return
+
+                if event.key() in [Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right]:
+                    found_annot.set_rect(rect)
+                    found_annot.update()
+                    self.selected_annot_rect = rect
+                    
+                    self.parent_viewer.refresh_view()
+
+                    page, page_y_start = self.parent_viewer.get_page_at_num(self.selected_annot_page)
+                    if page:
+                        zoom = self.parent_viewer.zoom_factor
+                        rect_on_scene = self.selected_annot_rect * zoom
+                        
+                        self.annot_highlight = QGraphicsRectItem(rect_on_scene.x0, rect_on_scene.y0 + page_y_start, rect_on_scene.width, rect_on_scene.height)
+                        self.annot_highlight.setPen(QPen(QColor("red")))
+                        self.scene().addItem(self.annot_highlight)
+
+                        self.update_and_show_guides(rect_on_scene, page_y_start)
+
+        super().keyPressEvent(event)
 
 
 class PDFViewer(QMainWindow):
@@ -135,6 +253,28 @@ class PDFViewer(QMainWindow):
         self.refresh_view()
         self.save_session()
 
+    def get_page_at(self, y_coord):
+        y_position = 0
+        zoom = self.zoom_factor
+        for page_num in range(len(self.doc)):
+            page = self.doc.load_page(page_num)
+            page_height = page.rect.height * zoom
+            if y_position <= y_coord < y_position + page_height:
+                return page, y_position
+            y_position += page_height + 10
+        return None, -1
+
+    def get_page_at_num(self, page_num):
+        y_position = 0
+        zoom = self.zoom_factor
+        for i in range(page_num):
+            page = self.doc.load_page(i)
+            page_height = page.rect.height * zoom
+            y_position += page_height + 10
+        
+        page = self.doc.load_page(page_num)
+        return page, y_position
+
     def save_pdf(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save PDF", "", "PDF Files (*.pdf)")
         if file_path and self.doc:
@@ -157,7 +297,11 @@ class PDFViewer(QMainWindow):
         self.refresh_view()
 
     def refresh_view(self):
-        self.scene.clear()
+        # Clear only the PDF page images (QGraphicsPixmapItem)
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsPixmapItem):
+                self.scene.removeItem(item)
+
         self.view.selection_rect = None
         if not self.doc:
             return
