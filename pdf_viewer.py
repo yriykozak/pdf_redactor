@@ -1,5 +1,7 @@
 import sys
 import fitz
+import json
+import os
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QInputDialog, QToolBar, QComboBox, QLabel
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QResizeEvent
 from PyQt6.QtCore import Qt
@@ -64,6 +66,7 @@ class PDFViewer(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         self.doc = None
         self.logical_doc = None
+        self.session_file = "session.json"
 
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
@@ -105,12 +108,32 @@ class PDFViewer(QMainWindow):
         self.view = PDFView(self.scene, self)
         self.setCentralWidget(self.view)
 
+        self.load_last_session()
+
+    def load_last_session(self):
+        if os.path.exists(self.session_file):
+            with open(self.session_file, 'r') as f:
+                session_data = json.load(f)
+                last_file = session_data.get("last_file")
+                if last_file and os.path.exists(last_file):
+                    self._open_pdf_from_path(last_file)
+
+    def save_session(self):
+        if self.doc:
+            session_data = {"last_file": self.doc.name}
+            with open(self.session_file, 'w') as f:
+                json.dump(session_data, f)
+
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if file_path:
-            self.doc = fitz.open(file_path)
-            self.logical_doc = LogicalDocument(self.doc)
-            self.refresh_view()
+            self._open_pdf_from_path(file_path)
+
+    def _open_pdf_from_path(self, file_path):
+        self.doc = fitz.open(file_path)
+        self.logical_doc = LogicalDocument(self.doc)
+        self.refresh_view()
+        self.save_session()
 
     def save_pdf(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save PDF", "", "PDF Files (*.pdf)")
@@ -119,16 +142,18 @@ class PDFViewer(QMainWindow):
 
     def edit_text_on_page(self, page_num, word_info, new_text):
         page = self.doc.load_page(page_num)
-        
+
         x0, y0, x1, y1, _, _, _, _ = word_info
         word_bbox = fitz.Rect(x0, y0, x1, y1)
-        
-        page.add_redact_annot(word_bbox)
+
+        # Redact the old word
+        page.add_redact_annot(word_bbox, fill=(1, 1, 1))
         page.apply_redactions()
-        
-        page.insert_text((x0, y1), new_text, fontname="helv", fontsize=11)
-        
-        self.logical_doc.parse_document() # Re-parse to update the logical model
+
+        # Add the new word as a FreeText annotation
+        page.add_freetext_annot(word_bbox, new_text, fontname="helv", fontsize=11, text_color=(0, 0, 0))
+
+        self.logical_doc.parse_document()
         self.refresh_view()
 
     def refresh_view(self):
