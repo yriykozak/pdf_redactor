@@ -2,7 +2,7 @@ import sys
 import fitz
 import json
 import os
-from PyQt6.QtWidgets import QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QInputDialog, QToolBar, QComboBox, QLabel, QGraphicsLineItem, QGraphicsPixmapItem
+from PyQt6.QtWidgets import QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QInputDialog, QToolBar, QComboBox, QLabel, QGraphicsLineItem, QGraphicsPixmapItem, QMessageBox
 from PyQt6.QtGui import QAction, QPixmap, QColor, QPen, QResizeEvent
 from PyQt6.QtCore import Qt
 from logical_document import LogicalDocument
@@ -45,79 +45,91 @@ class PDFView(QGraphicsView):
             guide.hide()
 
     def mousePressEvent(self, event):
-        scene_pos = self.mapToScene(event.pos())
-        zoom = self.parent_viewer.zoom_factor
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            zoom = self.parent_viewer.zoom_factor
 
-        if self.parent_viewer.doc:
-            # Check for annotation selection first
-            page, page_y_start = self.parent_viewer.get_page_at(scene_pos.y())
-            if page:
-                page_x = scene_pos.x() / zoom
-                page_y = (scene_pos.y() - page_y_start) / zoom
-                page_point = fitz.Point(page_x, page_y)
+            if self.parent_viewer.doc:
+                # Check for annotation selection first
+                page, page_y_start = self.parent_viewer.get_page_at(scene_pos.y())
+                if page:
+                    page_x = scene_pos.x() / zoom
+                    page_y = (scene_pos.y() - page_y_start) / zoom
+                    page_point = fitz.Point(page_x, page_y)
 
-                for annot in page.annots():
-                    if page_point in annot.rect:
-                        self.selected_annot_rect = annot.rect
-                        self.selected_annot_page = page.number
-                        if self.annot_highlight:
-                            self.scene().removeItem(self.annot_highlight)
+                    for annot in page.annots():
+                        if page_point in annot.rect:
+                            self.selected_annot_rect = annot.rect
+                            self.selected_annot_page = page.number
+                            if self.annot_highlight:
+                                self.scene().removeItem(self.annot_highlight)
+                            
+                            rect_on_scene = annot.rect * zoom
+                            self.annot_highlight = QGraphicsRectItem(rect_on_scene.x0, rect_on_scene.y0 + page_y_start, rect_on_scene.width, rect_on_scene.height)
+                            self.annot_highlight.setPen(QPen(QColor("red")))
+                            self.scene().addItem(self.annot_highlight)
+                            
+                            self.update_and_show_guides(rect_on_scene, page_y_start)
+                            return
+
+                # If no annotation was selected, clear selection and proceed
+                if self.selected_annot_rect:
+                    self.selected_annot_rect = None
+                    self.selected_annot_page = None
+                    self.scene().removeItem(self.annot_highlight)
+                    self.annot_highlight = None
+                    self.hide_guides()
+
+                # Word selection logic
+                page_num = -1
+                page_y_start_word = 0
+                for i in range(len(self.parent_viewer.doc)):
+                    page_height = self.parent_viewer.doc[i].rect.height * zoom
+                    if page_y_start_word <= scene_pos.y() < page_y_start_word + page_height:
+                        page_num = i
+                        break
+                    page_y_start_word += page_height + 10
+
+                if page_num == -1:
+                    return
+
+                page = self.parent_viewer.doc.load_page(page_num)
+                page_pos_y = (scene_pos.y() - page_y_start_word) / zoom
+                page_pos_x = scene_pos.x() / zoom
+
+                page_words = self.parent_viewer.logical_doc.get_page_words(page_num)
+                clicked_word = None
+                for word in page_words:
+                    x0, y0, x1, y1, text, _, _, _ = word
+                    if x0 <= page_pos_x < x1 and y0 <= page_pos_y < y1:
+                        clicked_word = word
+                        break
+
+                if clicked_word:
+                    new_text, ok = QInputDialog.getText(self, "Edit Word", "Enter new text:", text=clicked_word[4])
+
+                    if ok and new_text:
+                        word_bbox = fitz.Rect(clicked_word[:4])
+                        font_name, font_size = self.parent_viewer.get_font_for_word(page, word_bbox)
                         
-                        rect_on_scene = annot.rect * zoom
-                        self.annot_highlight = QGraphicsRectItem(rect_on_scene.x0, rect_on_scene.y0 + page_y_start, rect_on_scene.width, rect_on_scene.height)
-                        self.annot_highlight.setPen(QPen(QColor("red")))
-                        self.scene().addItem(self.annot_highlight)
-                        
-                        self.update_and_show_guides(rect_on_scene, page_y_start)
-                        return
+                        word_info = {
+                            "bbox": clicked_word[:4],
+                            "text": clicked_word[4],
+                            "font": font_name,
+                            "size": font_size
+                        }
+                        self.parent_viewer.edit_text_on_page(page_num, word_info, new_text)
 
-            # If no annotation was selected, clear selection and proceed
-            if self.selected_annot_rect:
-                self.selected_annot_rect = None
-                self.selected_annot_page = None
-                self.scene().removeItem(self.annot_highlight)
-                self.annot_highlight = None
-                self.hide_guides()
+                    if self.selection_rect:
+                        self.scene().removeItem(self.selection_rect)
 
-            # Word selection logic
-            page_num = -1
-            page_y_start_word = 0
-            for i in range(len(self.parent_viewer.doc)):
-                page_height = self.parent_viewer.doc[i].rect.height * zoom
-                if page_y_start_word <= scene_pos.y() < page_y_start_word + page_height:
-                    page_num = i
-                    break
-                page_y_start_word += page_height + 10
+                    x0, y0, x1, y1, _, _, _, _ = clicked_word
 
-            if page_num == -1:
-                return
-
-            page_pos_y = (scene_pos.y() - page_y_start_word) / zoom
-            page_pos_x = scene_pos.x() / zoom
-
-            page_words = self.parent_viewer.logical_doc.get_page_words(page_num)
-            clicked_word = None
-            for word in page_words:
-                x0, y0, x1, y1, text, _, _, _ = word
-                if x0 <= page_pos_x < x1 and y0 <= page_pos_y < y1:
-                    clicked_word = word
-                    break
-
-            if clicked_word:
-                new_text, ok = QInputDialog.getText(self, "Edit Word", "Enter new text:", text=clicked_word[4])
-
-                if ok and new_text:
-                    self.parent_viewer.edit_text_on_page(page_num, clicked_word, new_text)
-
-                if self.selection_rect:
-                    self.scene().removeItem(self.selection_rect)
-
-                x0, y0, x1, y1, _, _, _, _ = clicked_word
-
-                rect = QGraphicsRectItem(x0 * zoom, y0 * zoom + page_y_start_word, (x1 - x0) * zoom, (y1 - y0) * zoom)
-                rect.setPen(QPen(QColor("yellow")))
-                rect.setBrush(QColor(255, 255, 0, 100))
-                self.selection_rect = self.scene().addRect(rect.rect(), rect.pen(), rect.brush())
+                    rect = QGraphicsRectItem(x0 * zoom, y0 * zoom + page_y_start_word, (x1 - x0) * zoom, (y1 - y0) * zoom)
+                    rect.setPen(QPen(QColor("yellow")))
+                    rect.setBrush(QColor(255, 255, 0, 100))
+                    self.selection_rect = self.scene().addRect(rect.rect(), rect.pen(), rect.brush())
+        super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
         if self.selected_annot_rect:
@@ -176,6 +188,30 @@ class PDFView(QGraphicsView):
 
         super().keyPressEvent(event)
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            scene_pos = self.mapToScene(event.pos())
+            zoom = self.parent_viewer.zoom_factor
+
+            if self.parent_viewer.doc:
+                page, page_y_start = self.parent_viewer.get_page_at(scene_pos.y())
+                if page:
+                    page_x = scene_pos.x() / zoom
+                    page_y = (scene_pos.y() - page_y_start) / zoom
+                    page_point = fitz.Point(page_x, page_y)
+
+                    for annot in page.annots():
+                        if page_point in annot.rect:
+                            if annot.type[0] == 2: # FreeText
+                                current_text = annot.info["content"]
+                                new_text, ok = QInputDialog.getText(self, "Edit Annotation", "Enter new text:", text=current_text)
+                                if ok and new_text:
+                                    annot.set_info(content=new_text)
+                                    annot.update()
+                                    self.parent_viewer.refresh_view()
+                                return
+
+        super().mouseReleaseEvent(event)
 
 class PDFViewer(QMainWindow):
     def __init__(self):
@@ -280,18 +316,49 @@ class PDFViewer(QMainWindow):
         if file_path and self.doc:
             self.doc.save(file_path)
 
+    def get_font_for_word(self, page, word_bbox):
+        text_instances = page.get_text("dict")
+        for block in text_instances['blocks']:
+            if block.get("type") == 0: # Text block
+                for line in block['lines']:
+                    for span in line['spans']:
+                        span_bbox = fitz.Rect(span["bbox"])
+                        if span_bbox.intersects(word_bbox):
+                            return span["font"], span["size"]
+        return "helv", 11  # Default fallback
+
+    def get_font_name(self, font_string):
+        if '+' in font_string:
+            return font_string.split('+')[1]
+        return font_string
+
     def edit_text_on_page(self, page_num, word_info, new_text):
         page = self.doc.load_page(page_num)
 
-        x0, y0, x1, y1, _, _, _, _ = word_info
-        word_bbox = fitz.Rect(x0, y0, x1, y1)
+        font_name = self.get_font_name(word_info["font"])
+        font_size = word_info["size"]
+        word_bbox = fitz.Rect(word_info["bbox"])
+
+        try:
+            # Check if font is installed
+            from matplotlib.font_manager import findfont, FontProperties
+            findfont(FontProperties(family=font_name), fallback_to_default=False)
+        except (ValueError, RuntimeError):
+            # Font not found, show a message to the user
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setText(f"Font '{font_name}' is not installed on your system.")
+            msg_box.setInformativeText("Please install the font to ensure the edited text looks correct.")
+            msg_box.setWindowTitle("Font Not Found")
+            msg_box.exec()
+            # We still proceed to add the text with a default font
 
         # Redact the old word
         page.add_redact_annot(word_bbox, fill=(1, 1, 1))
         page.apply_redactions()
 
         # Add the new word as a FreeText annotation
-        page.add_freetext_annot(word_bbox, new_text, fontname="helv", fontsize=11, text_color=(0, 0, 0))
+        page.add_freetext_annot(word_bbox, new_text, fontname=font_name, fontsize=font_size, text_color=(0, 0, 0))
 
         self.logical_doc.parse_document()
         self.refresh_view()
